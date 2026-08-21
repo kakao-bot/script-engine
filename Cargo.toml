@@ -1,0 +1,11 @@
+[package]
+name = "script-engine"
+version = "0.0.1"
+edition = "2024"
+publish = false
+
+[workspace]
+
+[dependencies]
+kakao-loco-client = { git = "https://github.com/wHoIsDReAmer/loco-protocol" }
+tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
