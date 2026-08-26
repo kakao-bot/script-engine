@@ -1,5 +1,7 @@
-use kakao_loco_client::prelude::*;
+pub mod api;
+pub mod engine;
+pub mod host;
 
-pub trait Script {
-    fn on_message(&mut self, message: &Message<'_>) -> Option<String>;
-}
+pub use api::ScriptMessage;
+pub use engine::Script;
+pub use host::ScriptHost;

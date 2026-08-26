@@ -1,0 +1,14 @@
+pub async fn on_message(msg) {
+    if msg.text == "핑" {
+        msg.say("퐁").await?;
+    }
+
+    if msg.text == "하트" {
+        msg.react(bot::HEART).await?;
+    }
+
+    if msg.text.starts_with("!eval ") {
+        let code = msg.text["!eval ".len()..];
+        msg.say(msg.eval(code).await).await?;
+    }
+}
