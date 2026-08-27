@@ -1,5 +1,6 @@
 pub mod author;
 pub mod chat;
+pub mod fs;
 pub mod http;
 pub mod link;
 pub mod message;

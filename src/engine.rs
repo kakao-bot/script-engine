@@ -65,9 +65,12 @@ impl Script {
                 Class::<ScriptRoom>::define(&ctx.globals()).map_err(text)?;
                 Class::<ScriptLink>::define(&ctx.globals()).map_err(text)?;
                 Class::<ScriptSession>::define(&ctx.globals()).map_err(text)?;
+
+                // install additional functions
                 install_console(&ctx).map_err(text)?;
                 install_timers(&ctx).map_err(text)?;
                 crate::api::http::install(&ctx).map_err(text)?;
+                crate::api::fs::install(&ctx).map_err(text)?;
 
                 let mut options = rquickjs::context::EvalOptions::default();
                 options.global = false;
@@ -117,7 +120,7 @@ impl Script {
         self.defined.contains(&hook)
     }
 
-    /// Waits for whatever the script left running — a timer, a pending promise.
+    /// Waits for whatever the script left running.
     pub async fn idle(&self) {
         self.runtime.idle().await;
     }
@@ -185,8 +188,6 @@ fn install_console(ctx: &Ctx<'_>) -> rquickjs::Result<()> {
     ctx.globals().set("console", console)
 }
 
-/// `setTimeout` and `setInterval`, which quickjs leaves to the host. Both run on the
-/// runtime the script is already on, so a delayed reply still has its session.
 fn install_timers<'js>(ctx: &Ctx<'js>) -> rquickjs::Result<()> {
     let globals = ctx.globals();
 
@@ -237,7 +238,6 @@ fn joined(args: &[Value]) -> String {
 
 #[cfg(test)]
 impl Script {
-    /// Evaluates an expression and hands back what it rendered to.
     async fn probe(&self, expression: &str) -> String {
         let source = format!("String({expression})");
         self.context
@@ -323,8 +323,6 @@ mod tests {
         );
     }
 
-    /// The resolver walks from the process's own directory, so the entry has to be named
-    /// relative to it — an absolute path resolves to nothing.
     #[tokio::test]
     async fn a_script_imports_a_module_beside_it() {
         let entry = "import { roll } from './lib/dice.js';\n\
@@ -338,7 +336,6 @@ mod tests {
         script.call("onMessage", ()).await.unwrap();
     }
 
-    /// What the bare engine brings, so the gaps we fill are a deliberate list.
     #[tokio::test]
     async fn what_quickjs_ships_on_its_own() {
         let script = Script::compile("probe", "").await.unwrap();
@@ -354,7 +351,7 @@ mod tests {
         }
 
         // What we filled in ourselves.
-        for bound in ["console", "setTimeout", "sleep", "fetch"] {
+        for bound in ["console", "setTimeout", "sleep", "fetch", "fs"] {
             assert_ne!(
                 script.probe(&format!("typeof {bound}")).await,
                 "undefined",
@@ -411,6 +408,49 @@ mod tests {
             "true",
             "it never ran"
         );
+    }
+
+    #[tokio::test]
+    async fn a_script_keeps_its_own_state_on_disk() {
+        let path = std::env::temp_dir().join("script-engine-state/sheet.json");
+        let _ = std::fs::remove_file(&path);
+        let path = path.display().to_string();
+
+        let script = Script::compile(
+            "t",
+            &format!(
+                "globalThis.onMessage = async () => {{\n\
+                   await fs.write({path:?}, JSON.stringify({{ hp: 10 }}));\n\
+                   const back = JSON.parse(await fs.read({path:?}));\n\
+                   globalThis.hp = back.hp;\n\
+                 }};"
+            ),
+        )
+        .await
+        .unwrap();
+
+        script.call("onMessage", ()).await.unwrap();
+
+        assert_eq!(script.probe("globalThis.hp").await, "10");
+        // `write` made the directory rather than failing on a missing one.
+        assert!(std::path::Path::new(&path).exists());
+    }
+
+    #[tokio::test]
+    async fn a_missing_file_rejects_rather_than_returning_nothing() {
+        let script = Script::compile(
+            "t",
+            "globalThis.onMessage = async () => {\n\
+               try { await fs.read('/nope/nope'); globalThis.caught = 'no'; }\n\
+               catch (error) { globalThis.caught = 'yes'; }\n\
+             };",
+        )
+        .await
+        .unwrap();
+
+        script.call("onMessage", ()).await.unwrap();
+
+        assert_eq!(script.probe("globalThis.caught").await, "yes");
     }
 
     #[tokio::test]

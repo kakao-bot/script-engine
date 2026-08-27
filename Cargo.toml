@@ -11,6 +11,6 @@ kakao-loco-client = { git = "https://github.com/wHoIsDReAmer/loco-protocol" }
 reqwest = { version = "0.13", default-features = false, features = ["json", "rustls-no-provider"] }
 rquickjs = { version = "0.12.2", features = ["futures", "macro", "classes", "properties", "array-buffer", "loader"] }
 thiserror = "2"
-tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
+tokio = { version = "1", features = ["fs", "io-util", "macros", "rt-multi-thread", "time"] }
 tracing = "0.1.44"
 tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
