@@ -1,9 +1,11 @@
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 use rune::runtime::RuntimeContext;
 use rune::{Diagnostics, Source, Sources, Unit, Vm};
 
 use crate::api::{self, ScriptMessage};
+use crate::error::ScriptError;
 
 pub const ON_MESSAGE: &str = "on_message";
 
@@ -12,6 +14,11 @@ pub const EVAL_BUDGET: usize = 100_000;
 pub const EVAL_MEMORY: usize = 4 * 1024 * 1024;
 
 pub const EVAL_DEPTH_LIMIT: usize = 1;
+
+/// A spawned task starts its own depth scope, so without a ceiling a script could fork forever.
+pub const SPAWN_LIMIT: usize = 32;
+
+static SPAWNED: AtomicUsize = AtomicUsize::new(0);
 
 tokio::task_local! {
     static EVAL_DEPTH: usize;
@@ -25,17 +32,20 @@ pub struct Script {
 }
 
 impl Script {
-    pub fn compile(name: &str, code: &str) -> Result<Self, String> {
-        let mut context = rune::Context::with_default_modules().map_err(text)?;
+    pub fn compile(name: &str, code: &str) -> Result<Self, ScriptError> {
+        let mut context = rune::Context::with_default_modules().map_err(rune_error)?;
+        for module in extras().map_err(rune_error)? {
+            context.install(module).map_err(rune_error)?;
+        }
         context
-            .install(api::module().map_err(text)?)
-            .map_err(text)?;
-        let runtime = Arc::new(context.runtime().map_err(text)?);
+            .install(api::module().map_err(rune_error)?)
+            .map_err(rune_error)?;
+        let runtime = Arc::new(context.runtime().map_err(rune_error)?);
 
         let mut sources = Sources::new();
         sources
-            .insert(Source::new(name, code).map_err(text)?)
-            .map_err(text)?;
+            .insert(Source::new(name, code).map_err(rune_error)?)
+            .map_err(rune_error)?;
 
         let mut diagnostics = Diagnostics::new();
         let built = rune::prepare(&mut sources)
@@ -43,7 +53,10 @@ impl Script {
             .with_diagnostics(&mut diagnostics)
             .build();
 
-        let unit = Arc::new(built.map_err(|_| report(&diagnostics, &sources))?);
+        let unit = Arc::new(built.map_err(|_| ScriptError::Compile {
+            name: name.to_owned(),
+            report: report(&diagnostics, &sources),
+        })?);
         let handles_messages = Vm::new(runtime.clone(), unit.clone())
             .lookup_function([ON_MESSAGE])
             .is_ok();
@@ -60,7 +73,7 @@ impl Script {
         self.handles_messages
     }
 
-    pub async fn on_message(&self, message: ScriptMessage) -> Result<(), String> {
+    pub async fn on_message(&self, message: ScriptMessage) -> Result<(), ScriptError> {
         if !self.handles_messages {
             return Ok(());
         }
@@ -68,12 +81,22 @@ impl Script {
         vm.async_call([ON_MESSAGE], (message,))
             .await
             .map(|_| ())
-            .map_err(text)
+            .map_err(|error| ScriptError::Vm(error.to_string()))
     }
 }
 
-fn text(error: impl std::fmt::Display) -> String {
-    error.to_string()
+/// Anything that reaches the host machine or the network is left out on purpose.
+fn extras() -> Result<Vec<rune::Module>, rune::ContextError> {
+    Ok(vec![
+        rune_modules::json::module(false)?,
+        rune_modules::time::module(false)?,
+        rune_modules::rand::module(false)?,
+        rune_modules::base64::module(false)?,
+    ])
+}
+
+fn rune_error(error: impl std::fmt::Display) -> ScriptError {
+    ScriptError::Rune(error.to_string())
 }
 
 fn report(diagnostics: &Diagnostics, sources: &Sources) -> String {
@@ -86,21 +109,61 @@ fn report(diagnostics: &Diagnostics, sources: &Sources) -> String {
         .to_owned()
 }
 
-pub async fn eval(message: ScriptMessage, code: &str) -> Result<String, String> {
+pub async fn eval(message: ScriptMessage, code: &str) -> Result<String, ScriptError> {
     let depth = EVAL_DEPTH.try_with(|depth| *depth).unwrap_or(0);
     if depth >= EVAL_DEPTH_LIMIT {
-        return Err("eval 안에서 다시 eval 할 수 없다".to_owned());
+        return Err(ScriptError::Nested);
     }
     EVAL_DEPTH
         .scope(depth + 1, run(code, "msg", (message,)))
         .await
 }
 
+/// A rune vm is not `Send`, so the caller has to be inside a [`tokio::task::LocalSet`].
+pub fn spawn(work: rune::runtime::Future) -> Result<(), ScriptError> {
+    let slot = Slot::claim()?;
+    tokio::task::spawn_local(async move {
+        let _slot = slot;
+        if let Err(error) = rune::runtime::budget::with(EVAL_BUDGET, work)
+            .await
+            .into_result()
+        {
+            tracing::error!(%error, "background script failed");
+        }
+    });
+    Ok(())
+}
+
+/// Holds one background slot. Dropping it gives the slot back, so a script that panics
+/// or is cancelled does not take one with it.
+struct Slot;
+
+impl Slot {
+    fn claim() -> Result<Self, ScriptError> {
+        if SPAWNED.fetch_add(1, Ordering::Relaxed) >= SPAWN_LIMIT {
+            SPAWNED.fetch_sub(1, Ordering::Relaxed);
+            return Err(ScriptError::Crowded { limit: SPAWN_LIMIT });
+        }
+        Ok(Self)
+    }
+}
+
+impl Drop for Slot {
+    fn drop(&mut self) {
+        SPAWNED.fetch_sub(1, Ordering::Relaxed);
+    }
+}
+
+#[must_use]
+pub fn spawned() -> usize {
+    SPAWNED.load(Ordering::Relaxed)
+}
+
 async fn run(
     code: &str,
     params: &str,
     args: impl rune::runtime::GuardedArgs + Send,
-) -> Result<String, String> {
+) -> Result<String, ScriptError> {
     let wrapped = format!("pub async fn main({params}) {{ {code} }}");
     let script = Script::compile("eval", &wrapped)?;
     let mut vm = Vm::new(script.runtime.clone(), script.unit.clone());
@@ -109,13 +172,14 @@ async fn run(
 
     match outcome {
         Ok(value) => Ok(vm.with(|| format!("{value:?}"))),
-        Err(error) => Err(error.to_string()),
+        Err(error) => Err(ScriptError::Vm(error.to_string())),
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::Script;
+    use super::{SPAWN_LIMIT, Script};
+    use crate::error::ScriptError;
 
     #[test]
     fn a_script_that_handles_messages_says_so() {
@@ -135,13 +199,13 @@ mod tests {
     fn a_broken_script_reports_where_it_broke() {
         let refused = Script::compile("t", "pub async fn on_message(msg) { msg. }");
 
-        let Err(reported) = refused else {
+        let Err(error) = refused else {
             panic!("a broken script compiled");
         };
-        assert!(!reported.is_empty(), "the author needs something to read");
+        assert!(error.is_compile(), "{error}");
     }
 
-    async fn eval(code: &str) -> Result<String, String> {
+    async fn eval(code: &str) -> Result<String, ScriptError> {
         super::run(code, "", ()).await
     }
 
@@ -160,10 +224,13 @@ mod tests {
     async fn a_runaway_loop_is_cut_off_rather_than_hanging_the_bot() {
         let refused = eval("let n = 0; while true { n += 1 } n").await;
 
-        let Err(reported) = refused else {
+        let Err(error) = refused else {
             panic!("an endless loop returned");
         };
-        assert!(!reported.is_empty());
+        assert!(
+            matches!(error, ScriptError::Vm(_)),
+            "a budget stop is not a compile failure: {error}"
+        );
     }
 
     #[tokio::test]
@@ -178,6 +245,71 @@ mod tests {
     async fn a_reaction_can_be_named_rather_than_numbered() {
         assert_eq!(eval("bot::HEART").await.unwrap(), "1");
         assert_eq!(eval("bot::CANCEL").await.unwrap(), "0");
+    }
+
+    #[tokio::test]
+    async fn json_round_trips() {
+        let rendered = eval(r#"json::from_string("{\"a\":1}")?["a"]"#)
+            .await
+            .unwrap();
+
+        assert_eq!(rendered, "1");
+    }
+
+    #[tokio::test]
+    async fn a_script_can_wait() {
+        assert!(
+            eval("time::sleep(time::Duration::from_millis(1)).await; 1")
+                .await
+                .is_ok()
+        );
+    }
+
+    #[tokio::test]
+    async fn a_script_can_roll_dice() {
+        let rolled = eval("rand::int_range(1, 7)?").await.unwrap();
+
+        let rolled: i64 = rolled.parse().unwrap();
+        assert!((1..7).contains(&rolled), "{rolled}");
+    }
+
+    #[tokio::test]
+    async fn nothing_reaches_the_network_or_the_disk() {
+        for shut in [
+            "http::get(\"http://x\")",
+            "fs::read_to_string(\"/etc/passwd\")",
+            "process::Command::new(\"sh\")",
+        ] {
+            assert!(eval(shut).await.is_err(), "{shut} resolved");
+        }
+    }
+
+    #[test]
+    fn the_background_can_only_hold_so_many() {
+        let held: Vec<_> = (0..SPAWN_LIMIT)
+            .map(|_| super::Slot::claim().expect("under the ceiling"))
+            .collect();
+
+        assert_eq!(super::spawned(), SPAWN_LIMIT);
+        assert!(
+            super::Slot::claim().is_err(),
+            "the ceiling let one more through"
+        );
+
+        drop(held);
+        assert_eq!(super::spawned(), 0, "a finished script freed nothing");
+    }
+
+    #[test]
+    fn a_script_that_unwinds_still_frees_its_slot() {
+        let before = super::spawned();
+
+        let _ = std::panic::catch_unwind(|| {
+            let _slot = super::Slot::claim().expect("under the ceiling");
+            panic!("a script blew up");
+        });
+
+        assert_eq!(super::spawned(), before);
     }
 
     #[tokio::test]

@@ -3,6 +3,7 @@ pub mod chat;
 pub mod link;
 pub mod message;
 pub mod room;
+pub mod script;
 pub mod session;
 
 pub use author::ScriptAuthor;
@@ -35,7 +36,6 @@ try_clone!(
     ScriptSession
 );
 
-/// Named so a script never has to remember which number is which reaction.
 const REACTIONS: [(&str, i32); 7] = [
     ("CANCEL", 0),
     ("HEART", 1),
@@ -57,5 +57,6 @@ pub fn module() -> Result<rune::Module, rune::ContextError> {
     author::install(&mut module)?;
     room::install(&mut module)?;
     link::install(&mut module)?;
+    script::install(&mut module)?;
     Ok(module)
 }

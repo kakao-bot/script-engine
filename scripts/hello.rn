@@ -7,8 +7,15 @@ pub async fn on_message(msg) {
         msg.react(bot::HEART).await?;
     }
 
+    if msg.text == "나중에" {
+        bot::spawn(async {
+            time::sleep(time::Duration::from_secs(5)).await;
+            msg.say("5초 지났다").await?;
+        })?;
+    }
+
     if msg.text.starts_with("!eval ") {
         let code = msg.text["!eval ".len()..];
-        msg.say(msg.eval(code).await).await?;
+        msg.say(bot::eval(msg, code).await).await?;
     }
 }

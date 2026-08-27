@@ -124,15 +124,6 @@ async fn react(this: Ref<ScriptMessage>, reaction: i32) -> Result<(), String> {
         .map_err(text_of)
 }
 
-#[rune::function(instance, keep)]
-async fn eval(this: Ref<ScriptMessage>, code: String) -> String {
-    let message = ScriptMessage::clone(&this);
-    match crate::engine::eval(message, &code).await {
-        Ok(value) => value,
-        Err(reported) => reported,
-    }
-}
-
 pub fn install(module: &mut rune::Module) -> Result<(), rune::ContextError> {
     module.ty::<ScriptMessage>()?;
     module.function_meta(say__meta)?;
@@ -140,7 +131,6 @@ pub fn install(module: &mut rune::Module) -> Result<(), rune::ContextError> {
     module.function_meta(edit__meta)?;
     module.function_meta(delete__meta)?;
     module.function_meta(react__meta)?;
-    module.function_meta(eval__meta)?;
     module.function_meta(ScriptMessage::display_fmt__meta)?;
     module.function_meta(ScriptMessage::debug_fmt__meta)?;
     Ok(())

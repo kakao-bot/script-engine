@@ -4,6 +4,7 @@ use kakao_loco_client::prelude::*;
 
 use crate::api::ScriptMessage;
 use crate::engine::Script;
+use crate::error::ScriptError;
 
 pub const EXTENSION: &str = "rn";
 
@@ -19,9 +20,12 @@ impl ScriptHost {
         }
     }
 
-    pub fn load_dir(directory: &Path) -> Result<Self, String> {
+    pub fn load_dir(directory: &Path) -> Result<Self, ScriptError> {
         let mut paths: Vec<PathBuf> = std::fs::read_dir(directory)
-            .map_err(|error| format!("{}: {error}", directory.display()))?
+            .map_err(|source| ScriptError::Unreadable {
+                path: directory.display().to_string(),
+                source,
+            })?
             .filter_map(Result::ok)
             .map(|entry| entry.path())
             .filter(|path| path.extension().is_some_and(|kind| kind == EXTENSION))
@@ -34,17 +38,19 @@ impl ScriptHost {
                 .file_name()
                 .map(|name| name.to_string_lossy().into_owned())
                 .unwrap_or_default();
-            let code = std::fs::read_to_string(&path)
-                .map_err(|error| format!("{}: {error}", path.display()))?;
+            let code =
+                std::fs::read_to_string(&path).map_err(|source| ScriptError::Unreadable {
+                    path: path.display().to_string(),
+                    source,
+                })?;
             host.add(&name, &code)?;
         }
         Ok(host)
     }
 
-    pub fn add(&mut self, name: &str, code: &str) -> Result<(), String> {
-        let script =
-            Script::compile(name, code).map_err(|reported| format!("{name}\n{reported}"))?;
-        self.scripts.push((name.to_owned(), script));
+    pub fn add(&mut self, name: &str, code: &str) -> Result<(), ScriptError> {
+        self.scripts
+            .push((name.to_owned(), Script::compile(name, code)?));
         Ok(())
     }
 
@@ -77,8 +83,8 @@ impl Handler for ScriptHost {
             if !script.handles_messages() {
                 continue;
             }
-            if let Err(reported) = script.on_message(carried.clone()).await {
-                eprintln!("{name}: {reported}");
+            if let Err(error) = script.on_message(carried.clone()).await {
+                tracing::error!(script = %name, %error, "script failed");
             }
         }
         Ok(())
@@ -106,15 +112,26 @@ mod tests {
     }
 
     #[test]
+    fn the_shipped_script_compiles() {
+        let mut host = ScriptHost::new();
+        let code = std::fs::read_to_string("scripts/hello.rn").unwrap();
+
+        host.add("hello.rn", &code).unwrap();
+
+        assert_eq!(host.len(), 1);
+    }
+
+    #[test]
     fn a_broken_script_names_itself_in_the_complaint() {
         let mut host = ScriptHost::new();
 
         let refused = host.add("bad.rn", "pub async fn on_message(msg) { msg. }");
 
-        let Err(reported) = refused else {
+        let Err(error) = refused else {
             panic!("a broken script loaded");
         };
-        assert!(reported.starts_with("bad.rn"));
+        assert!(error.is_compile(), "{error}");
+        assert!(error.to_string().starts_with("bad.rn"));
         assert!(host.is_empty());
     }
 }
