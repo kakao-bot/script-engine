@@ -7,7 +7,27 @@ use rune::{Diagnostics, Source, Sources, Unit, Vm};
 use crate::api::{self, ScriptMessage};
 use crate::error::ScriptError;
 
-pub const ON_MESSAGE: &str = "on_message";
+/// Every hook a script may define. One that is missing is simply not called.
+pub const HOOKS: [&str; 18] = [
+    "on_message",
+    "on_join",
+    "on_leave",
+    "on_member_change",
+    "on_read",
+    "on_reaction",
+    "on_feed",
+    "on_sync_join",
+    "on_link_profile",
+    "on_left",
+    "on_meta_change",
+    "on_login",
+    "on_listening",
+    "on_kicked",
+    "on_moved",
+    "on_push",
+    "on_connect",
+    "on_close",
+];
 
 pub const EVAL_BUDGET: usize = 100_000;
 
@@ -28,7 +48,7 @@ tokio::task_local! {
 pub struct Script {
     runtime: Arc<RuntimeContext>,
     unit: Arc<Unit>,
-    handles_messages: bool,
+    defined: Vec<&'static str>,
 }
 
 impl Script {
@@ -57,28 +77,39 @@ impl Script {
             name: name.to_owned(),
             report: report(&diagnostics, &sources),
         })?);
-        let handles_messages = Vm::new(runtime.clone(), unit.clone())
-            .lookup_function([ON_MESSAGE])
-            .is_ok();
+        let probe = Vm::new(runtime.clone(), unit.clone());
+        let defined = HOOKS
+            .into_iter()
+            .filter(|hook| probe.lookup_function([*hook]).is_ok())
+            .collect();
 
         Ok(Self {
             runtime,
             unit,
-            handles_messages,
+            defined,
         })
     }
 
     #[must_use]
-    pub fn handles_messages(&self) -> bool {
-        self.handles_messages
+    pub fn defines(&self, hook: &str) -> bool {
+        self.defined.contains(&hook)
     }
 
-    pub async fn on_message(&self, message: ScriptMessage) -> Result<(), ScriptError> {
-        if !self.handles_messages {
+    #[must_use]
+    pub fn hooks(&self) -> &[&'static str] {
+        &self.defined
+    }
+
+    pub async fn call(
+        &self,
+        hook: &'static str,
+        args: impl rune::runtime::GuardedArgs + Send,
+    ) -> Result<(), ScriptError> {
+        if !self.defines(hook) {
             return Ok(());
         }
         let mut vm = Vm::new(self.runtime.clone(), self.unit.clone());
-        vm.async_call([ON_MESSAGE], (message,))
+        rune::runtime::budget::with(EVAL_BUDGET, vm.async_call([hook], args))
             .await
             .map(|_| ())
             .map_err(|error| ScriptError::Vm(error.to_string()))
@@ -182,17 +213,18 @@ mod tests {
     use crate::error::ScriptError;
 
     #[test]
-    fn a_script_that_handles_messages_says_so() {
+    fn a_script_says_which_hooks_it_defines() {
         let script = Script::compile("t", "pub async fn on_message(msg) {}").unwrap();
 
-        assert!(script.handles_messages());
+        assert!(script.defines("on_message"));
+        assert!(!script.defines("on_join"));
     }
 
     #[test]
     fn a_script_without_the_hook_is_still_valid() {
         let script = Script::compile("t", "pub fn other() {}").unwrap();
 
-        assert!(!script.handles_messages());
+        assert!(script.hooks().is_empty());
     }
 
     #[test]
