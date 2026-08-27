@@ -13,10 +13,10 @@ use crate::api::{ScriptAuthor, ScriptChat, ScriptMessage};
 use crate::engine::Script;
 use crate::error::ScriptError;
 
-pub const EXTENSION: &str = "rn";
+pub const EXTENSION: &str = "js";
 
 pub struct ScriptHost {
-    scripts: Vec<(String, Script)>,
+    scripts: Vec<Script>,
 }
 
 impl ScriptHost {
@@ -27,7 +27,7 @@ impl ScriptHost {
         }
     }
 
-    pub fn load_dir(directory: &Path) -> Result<Self, ScriptError> {
+    pub async fn load_dir(directory: &Path) -> Result<Self, ScriptError> {
         let mut paths: Vec<PathBuf> = std::fs::read_dir(directory)
             .map_err(|source| ScriptError::Unreadable {
                 path: directory.display().to_string(),
@@ -50,14 +50,13 @@ impl ScriptHost {
                     path: path.display().to_string(),
                     source,
                 })?;
-            host.add(&name, &code)?;
+            host.add(&name, &code).await?;
         }
         Ok(host)
     }
 
-    pub fn add(&mut self, name: &str, code: &str) -> Result<(), ScriptError> {
-        self.scripts
-            .push((name.to_owned(), Script::compile(name, code)?));
+    pub async fn add(&mut self, name: &str, code: &str) -> Result<(), ScriptError> {
+        self.scripts.push(Script::compile(name, code).await?);
         Ok(())
     }
 
@@ -73,7 +72,7 @@ impl ScriptHost {
 
     #[must_use]
     pub fn names(&self) -> Vec<&str> {
-        self.scripts.iter().map(|(name, _)| name.as_str()).collect()
+        self.scripts.iter().map(Script::name).collect()
     }
 }
 
@@ -84,11 +83,14 @@ impl Default for ScriptHost {
 }
 
 impl ScriptHost {
-    async fn fire(&self, hook: &'static str, args: impl rune::runtime::GuardedArgs + Send + Clone) {
+    async fn fire<A>(&self, hook: &'static str, args: A)
+    where
+        A: for<'js> rquickjs::function::IntoArgs<'js> + Send + Clone + 'static,
+    {
         tracing::debug!(hook, "event");
-        for (name, script) in &self.scripts {
+        for script in &self.scripts {
             if let Err(error) = script.call(hook, args.clone()).await {
-                tracing::error!(script = %name, hook, %error, "script failed");
+                tracing::error!(script = %script.name(), hook, %error, "script failed");
             }
         }
     }
@@ -96,60 +98,26 @@ impl ScriptHost {
 
 impl Handler for ScriptHost {
     async fn on_message(&mut self, message: Message<'_>) -> Result<(), ClientError> {
-        self.fire("on_message", (ScriptMessage::new(&message),))
+        self.fire("onMessage", (ScriptMessage::new(&message),))
             .await;
         Ok(())
     }
 
     async fn on_join(&mut self, chat: Chat, members: Vec<Author>) -> Result<(), ClientError> {
-        self.fire("on_join", (ScriptChat::new(&chat), authors(members)))
+        self.fire("onJoin", (ScriptChat::new(&chat), authors(members)))
             .await;
         Ok(())
     }
 
     async fn on_leave(&mut self, chat: Chat, members: Vec<Author>) -> Result<(), ClientError> {
-        self.fire("on_leave", (ScriptChat::new(&chat), authors(members)))
+        self.fire("onLeave", (ScriptChat::new(&chat), authors(members)))
             .await;
-        Ok(())
-    }
-
-    async fn on_member_change(
-        &mut self,
-        chat: Chat,
-        change: &MemberChange,
-        members: Vec<Author>,
-    ) -> Result<(), ClientError> {
-        self.fire(
-            "on_member_change",
-            (ScriptChat::new(&chat), change.joined, authors(members)),
-        )
-        .await;
-        Ok(())
-    }
-
-    async fn on_sync_join(&mut self, chat: Chat, _push: &FeedPush) -> Result<(), ClientError> {
-        self.fire("on_sync_join", (ScriptChat::new(&chat),)).await;
-        Ok(())
-    }
-
-    async fn on_link_profile(
-        &mut self,
-        chat: Chat,
-        changed: &SyncLinkProfile,
-    ) -> Result<(), ClientError> {
-        self.fire("on_link_profile", (ScriptChat::new(&chat), changed.link_id))
-            .await;
-        Ok(())
-    }
-
-    async fn on_left(&mut self, chat: Chat, _left: &Left) -> Result<(), ClientError> {
-        self.fire("on_left", (ScriptChat::new(&chat),)).await;
         Ok(())
     }
 
     async fn on_read(&mut self, chat: Chat, read: &DecUnread) -> Result<(), ClientError> {
         self.fire(
-            "on_read",
+            "onRead",
             (ScriptChat::new(&chat), read.user_id, read.watermark),
         )
         .await;
@@ -158,7 +126,7 @@ impl Handler for ScriptHost {
 
     async fn on_log_meta(&mut self, chat: Chat, changed: &ChgLogMeta) -> Result<(), ClientError> {
         self.fire(
-            "on_reaction",
+            "onReaction",
             (
                 ScriptChat::new(&chat),
                 changed.log_id,
@@ -170,9 +138,43 @@ impl Handler for ScriptHost {
         Ok(())
     }
 
+    async fn on_member_change(
+        &mut self,
+        chat: Chat,
+        change: &MemberChange,
+        members: Vec<Author>,
+    ) -> Result<(), ClientError> {
+        self.fire(
+            "onMemberChange",
+            (ScriptChat::new(&chat), change.joined, authors(members)),
+        )
+        .await;
+        Ok(())
+    }
+
     async fn on_feed(&mut self, chat: Chat, feed: &Feed) -> Result<(), ClientError> {
-        self.fire("on_feed", (ScriptChat::new(&chat), feed.feed_type.value()))
+        self.fire("onFeed", (ScriptChat::new(&chat), feed.feed_type.value()))
             .await;
+        Ok(())
+    }
+
+    async fn on_sync_join(&mut self, chat: Chat, _push: &FeedPush) -> Result<(), ClientError> {
+        self.fire("onSyncJoin", (ScriptChat::new(&chat),)).await;
+        Ok(())
+    }
+
+    async fn on_link_profile(
+        &mut self,
+        chat: Chat,
+        changed: &SyncLinkProfile,
+    ) -> Result<(), ClientError> {
+        self.fire("onLinkProfile", (ScriptChat::new(&chat), changed.link_id))
+            .await;
+        Ok(())
+    }
+
+    async fn on_left(&mut self, chat: Chat, _left: &Left) -> Result<(), ClientError> {
+        self.fire("onLeft", (ScriptChat::new(&chat),)).await;
         Ok(())
     }
 
@@ -183,24 +185,24 @@ impl Handler for ScriptHost {
     ) -> Result<(), ClientError> {
         match event {
             SessionEvent::LoggedIn { response, .. } => {
-                self.fire("on_login", (response.user_id.unwrap_or_default(),))
+                self.fire("onLogin", (response.user_id.unwrap_or_default(),))
                     .await;
             }
             SessionEvent::Listening { ping_interval } => {
                 let seconds = i64::try_from(ping_interval.as_secs()).unwrap_or_default();
-                self.fire("on_listening", (seconds,)).await;
+                self.fire("onListening", (seconds,)).await;
             }
             SessionEvent::Push { packet, kind, .. } => {
                 let method = packet.header.method.to_string();
                 match kind {
-                    PushKind::KickedOut(_) => self.fire("on_kicked", ()).await,
+                    PushKind::KickedOut(_) => self.fire("onKicked", ()).await,
                     PushKind::ChangeServer | PushKind::Restarted(_) => {
-                        self.fire("on_moved", (method,)).await;
+                        self.fire("onMoved", (method,)).await;
                     }
                     PushKind::MetaChanged(changed) => {
                         let meta = changed.meta.as_ref();
                         self.fire(
-                            "on_meta_change",
+                            "onMetaChange",
                             (
                                 changed.chat_id,
                                 meta.map_or(0, |meta| meta.meta_type),
@@ -209,7 +211,7 @@ impl Handler for ScriptHost {
                         )
                         .await;
                     }
-                    _ => self.fire("on_push", (method,)).await,
+                    _ => self.fire("onPush", (method,)).await,
                 }
             }
             SessionEvent::PingAcknowledged => {}
@@ -218,7 +220,7 @@ impl Handler for ScriptHost {
     }
 
     async fn on_connect(&mut self, _plan: &Plan, _endpoint: &Endpoint) -> Result<(), ClientError> {
-        self.fire("on_connect", ()).await;
+        self.fire("onConnect", ()).await;
         Ok(())
     }
 
@@ -227,7 +229,7 @@ impl Handler for ScriptHost {
             Ok(()) => String::new(),
             Err(error) => error.to_string(),
         };
-        self.fire("on_close", (reason,)).await;
+        self.fire("onClose", (reason,)).await;
     }
 }
 
@@ -244,38 +246,41 @@ mod tests {
         assert!(ScriptHost::new().is_empty());
     }
 
-    #[test]
-    fn a_loaded_script_is_listed_by_name() {
+    #[tokio::test]
+    async fn a_loaded_script_is_listed_by_name() {
         let mut host = ScriptHost::new();
 
-        host.add("hello.rn", "pub async fn on_message(msg) {}")
+        host.add("hello.js", "globalThis.onMessage = async () => {};")
+            .await
             .unwrap();
 
         assert_eq!(host.len(), 1);
-        assert_eq!(host.names(), vec!["hello.rn"]);
+        assert_eq!(host.names(), vec!["hello.js"]);
     }
 
-    #[test]
-    fn the_shipped_script_compiles() {
+    #[tokio::test]
+    async fn the_shipped_script_compiles() {
         let mut host = ScriptHost::new();
-        let code = std::fs::read_to_string("scripts/hello.rn").unwrap();
+        let code = std::fs::read_to_string("scripts/hello.js").unwrap();
 
-        host.add("hello.rn", &code).unwrap();
+        host.add("hello.js", &code).await.unwrap();
 
         assert_eq!(host.len(), 1);
     }
 
-    #[test]
-    fn a_broken_script_names_itself_in_the_complaint() {
+    #[tokio::test]
+    async fn a_broken_script_names_itself_in_the_complaint() {
         let mut host = ScriptHost::new();
 
-        let refused = host.add("bad.rn", "pub async fn on_message(msg) { msg. }");
+        let refused = host
+            .add("bad.js", "globalThis.onMessage = async ( => {};")
+            .await;
 
         let Err(error) = refused else {
             panic!("a broken script loaded");
         };
         assert!(error.is_compile(), "{error}");
-        assert!(error.to_string().starts_with("bad.rn"));
+        assert!(error.to_string().starts_with("bad.js"));
         assert!(host.is_empty());
     }
 }

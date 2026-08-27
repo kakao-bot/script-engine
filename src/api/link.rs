@@ -1,32 +1,32 @@
 use std::sync::Arc;
 
 use kakao_loco_client::prelude::*;
-use rune::alloc::fmt::TryWrite;
-use rune::runtime::{Formatter, Ref, VmResult};
-use rune::vm_write;
+use rquickjs::JsLifetime;
+use rquickjs::class::Trace;
 
-use super::{ScriptChat, text_of};
+use super::{ScriptChat, failed};
 
-#[derive(Clone, rune::Any)]
-#[rune(item = ::bot)]
+#[derive(Clone, Trace, JsLifetime)]
+#[rquickjs::class(rename = "Link")]
 pub struct ScriptLink {
-    #[rune(get)]
+    #[qjs(get)]
     pub link_id: i64,
-    #[rune(get)]
+    #[qjs(get)]
     pub name: String,
-    #[rune(get)]
+    #[qjs(get)]
     pub url: String,
-    #[rune(get)]
+    #[qjs(get)]
     pub description: String,
-    #[rune(get)]
+    #[qjs(get)]
     pub member_count: i32,
-    #[rune(get)]
+    #[qjs(get)]
     pub member_limit: i32,
-    #[rune(get)]
+    #[qjs(get)]
     pub needs_passcode: bool,
-    #[rune(get)]
+    #[qjs(get)]
     pub active: bool,
-    pub(crate) link: Arc<Link>,
+    #[qjs(skip_trace)]
+    link: Arc<Link>,
 }
 
 impl ScriptLink {
@@ -44,79 +44,38 @@ impl ScriptLink {
             link: Arc::new(link),
         }
     }
+}
 
-    #[rune::function(keep, instance, protocol = DEBUG_FMT)]
-    fn debug_fmt(&self, f: &mut Formatter) -> VmResult<()> {
-        vm_write!(
-            f,
-            "ScriptLink {{ link_id: {}, name: {:?}, members: {}/{}, needs_passcode: {} }}",
-            self.link_id,
-            self.name,
-            self.member_count,
-            self.member_limit,
-            self.needs_passcode
-        )
+#[rquickjs::methods]
+impl ScriptLink {
+    async fn join(&self) -> rquickjs::Result<ScriptChat> {
+        self.link
+            .join(JoinProfile::Main)
+            .await
+            .map(|joined| ScriptChat::new(&joined.chat))
+            .map_err(failed)
     }
-}
 
-#[derive(Clone, rune::Any)]
-#[rune(item = ::bot)]
-pub struct ScriptJoined {
-    #[rune(get)]
-    pub chat: ScriptChat,
-    #[rune(get)]
-    pub nickname: String,
-    #[rune(get)]
-    pub user_id: i64,
-}
+    #[qjs(rename = "joinAs")]
+    async fn join_as(&self, nickname: String) -> rquickjs::Result<ScriptChat> {
+        self.link
+            .join(JoinProfile::nickname(nickname))
+            .await
+            .map(|joined| ScriptChat::new(&joined.chat))
+            .map_err(failed)
+    }
 
-#[rune::function(instance, keep)]
-async fn join(this: Ref<ScriptLink>) -> Result<ScriptJoined, String> {
-    let joined = this.link.join(JoinProfile::Main).await.map_err(text_of)?;
-    Ok(ScriptJoined {
-        chat: ScriptChat::new(&joined.chat),
-        nickname: joined.nickname,
-        user_id: joined.user_id,
-    })
-}
+    #[qjs(rename = "joinWithPasscode")]
+    async fn join_with_passcode(&self, passcode: String) -> rquickjs::Result<ScriptChat> {
+        self.link
+            .join_with_passcode(JoinProfile::Main, &passcode)
+            .await
+            .map(|joined| ScriptChat::new(&joined.chat))
+            .map_err(failed)
+    }
 
-#[rune::function(instance, keep)]
-async fn join_as(this: Ref<ScriptLink>, nickname: String) -> Result<ScriptJoined, String> {
-    let joined = this
-        .link
-        .join(JoinProfile::nickname(nickname))
-        .await
-        .map_err(text_of)?;
-    Ok(ScriptJoined {
-        chat: ScriptChat::new(&joined.chat),
-        nickname: joined.nickname,
-        user_id: joined.user_id,
-    })
-}
-
-#[rune::function(instance, keep)]
-async fn join_with_passcode(
-    this: Ref<ScriptLink>,
-    passcode: String,
-) -> Result<ScriptJoined, String> {
-    let joined = this
-        .link
-        .join_with_passcode(JoinProfile::Main, &passcode)
-        .await
-        .map_err(text_of)?;
-    Ok(ScriptJoined {
-        chat: ScriptChat::new(&joined.chat),
-        nickname: joined.nickname,
-        user_id: joined.user_id,
-    })
-}
-
-pub fn install(module: &mut rune::Module) -> Result<(), rune::ContextError> {
-    module.ty::<ScriptLink>()?;
-    module.ty::<ScriptJoined>()?;
-    module.function_meta(join__meta)?;
-    module.function_meta(join_as__meta)?;
-    module.function_meta(join_with_passcode__meta)?;
-    module.function_meta(ScriptLink::debug_fmt__meta)?;
-    Ok(())
+    #[qjs(rename = "toString")]
+    fn to_string_js(&self) -> String {
+        format!("Link({}, {})", self.link_id, self.name)
+    }
 }
