@@ -1,4 +1,4 @@
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 use kakao_loco_client::api::author::Author;
 use kakao_loco_client::core::command::chat::{
@@ -13,7 +13,7 @@ use crate::api::{ScriptAuthor, ScriptChat, ScriptMessage};
 use crate::engine::Script;
 use crate::error::ScriptError;
 
-pub const EXTENSION: &str = "js";
+pub const ENTRY: &str = "index.js";
 
 pub struct ScriptHost {
     scripts: Vec<Script>,
@@ -27,31 +27,18 @@ impl ScriptHost {
         }
     }
 
+    /// Loads `index.js`. Everything else is a module it imports, so the bot has one
+    /// entry point rather than one per file.
     pub async fn load_dir(directory: &Path) -> Result<Self, ScriptError> {
-        let mut paths: Vec<PathBuf> = std::fs::read_dir(directory)
-            .map_err(|source| ScriptError::Unreadable {
-                path: directory.display().to_string(),
-                source,
-            })?
-            .filter_map(Result::ok)
-            .map(|entry| entry.path())
-            .filter(|path| path.extension().is_some_and(|kind| kind == EXTENSION))
-            .collect();
-        paths.sort();
+        let entry = directory.join(ENTRY);
+        let code = std::fs::read_to_string(&entry).map_err(|source| ScriptError::Unreadable {
+            path: entry.display().to_string(),
+            source,
+        })?;
 
         let mut host = Self::new();
-        for path in paths {
-            let name = path
-                .file_name()
-                .map(|name| name.to_string_lossy().into_owned())
-                .unwrap_or_default();
-            let code =
-                std::fs::read_to_string(&path).map_err(|source| ScriptError::Unreadable {
-                    path: path.display().to_string(),
-                    source,
-                })?;
-            host.add(&name, &code).await?;
-        }
+        host.scripts
+            .push(Script::compile_in(ENTRY, &code, directory).await?);
         Ok(host)
     }
 
@@ -250,22 +237,32 @@ mod tests {
     async fn a_loaded_script_is_listed_by_name() {
         let mut host = ScriptHost::new();
 
-        host.add("hello.js", "globalThis.onMessage = async () => {};")
+        host.add("index.js", "globalThis.onMessage = async () => {};")
             .await
             .unwrap();
 
         assert_eq!(host.len(), 1);
-        assert_eq!(host.names(), vec!["hello.js"]);
+        assert_eq!(host.names(), vec!["index.js"]);
     }
 
     #[tokio::test]
-    async fn the_shipped_script_compiles() {
-        let mut host = ScriptHost::new();
-        let code = std::fs::read_to_string("scripts/hello.js").unwrap();
+    async fn the_shipped_scripts_compile() {
+        let host = ScriptHost::load_dir(std::path::Path::new("scripts"))
+            .await
+            .unwrap();
 
-        host.add("hello.js", &code).await.unwrap();
+        assert_eq!(host.len(), 1, "one entry, whatever it imports");
+        assert_eq!(host.names(), vec!["index.js"]);
+    }
 
-        assert_eq!(host.len(), 1);
+    #[tokio::test]
+    async fn a_directory_without_an_entry_says_which_file_it_wanted() {
+        let refused = ScriptHost::load_dir(std::path::Path::new("src")).await;
+
+        let Err(error) = refused else {
+            panic!("a directory with no index.js loaded");
+        };
+        assert!(error.to_string().contains("index.js"), "{error}");
     }
 
     #[tokio::test]

@@ -62,4 +62,50 @@ impl ScriptMessage {
             .map(|log| log.log_id)
             .map_err(failed)
     }
+
+    async fn react(&self, reaction: i32) -> rquickjs::Result<()> {
+        let reaction = ReactionType::new(reaction)
+            .ok_or_else(|| failed(format!("{reaction} 은 없는 반응이다")))?;
+        self.chat
+            .chat
+            .react(self.log_id, reaction)
+            .await
+            .map_err(failed)
+    }
+
+    #[qjs(rename = "cancelReaction")]
+    async fn cancel_reaction(&self) -> rquickjs::Result<()> {
+        self.chat
+            .chat
+            .cancel_reaction(self.log_id)
+            .await
+            .map_err(failed)
+    }
+
+    async fn edit(&self, text: String) -> rquickjs::Result<()> {
+        self.chat
+            .chat
+            .edit(&self.log, &text)
+            .await
+            .map(drop)
+            .map_err(failed)
+    }
+
+    async fn delete(&self) -> rquickjs::Result<bool> {
+        self.chat
+            .chat
+            .delete(self.log_id)
+            .await
+            .map(|log| log.is_some())
+            .map_err(failed)
+    }
+
+    async fn hide(&self) -> rquickjs::Result<String> {
+        self.chat.chat.hide(&[self.log_id]).await.map_err(failed)
+    }
+
+    #[qjs(rename = "toString")]
+    fn to_string_js(&self) -> String {
+        format!("{}: {}", self.author.name, self.text)
+    }
 }

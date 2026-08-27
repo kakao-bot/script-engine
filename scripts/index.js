@@ -1,6 +1,12 @@
+import { roll } from "./lib/dice.js";
+
 globalThis.onMessage = async (msg) => {
     if (msg.text === "핑") {
         await msg.say("퐁");
+    }
+
+    if (msg.text === "주사위") {
+        await msg.say(`${roll(20)}`);
     }
 
     if (msg.text === "누구") {

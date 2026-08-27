@@ -1,4 +1,5 @@
 use rquickjs::function::{Func, Rest};
+use rquickjs::loader::{FileResolver, ScriptLoader};
 use rquickjs::{AsyncContext, AsyncRuntime, CatchResultExt, Class, Ctx, Function, Object, Value};
 
 use crate::api::{ScriptAuthor, ScriptChat, ScriptLink, ScriptMessage, ScriptRoom, ScriptSession};
@@ -33,12 +34,28 @@ pub struct Script {
 
 impl Script {
     pub async fn compile(name: &str, code: &str) -> Result<Self, ScriptError> {
+        Self::compile_in(name, code, std::path::Path::new(".")).await
+    }
+
+    pub async fn compile_in(
+        name: &str,
+        code: &str,
+        directory: &std::path::Path,
+    ) -> Result<Self, ScriptError> {
         let runtime = AsyncRuntime::new().map_err(engine_error)?;
+        runtime
+            .set_loader(
+                FileResolver::default().with_path(directory.to_string_lossy().as_ref()),
+                ScriptLoader::default().with_extension("js"),
+            )
+            .await;
         let context = AsyncContext::full(&runtime).await.map_err(engine_error)?;
 
         let source = code.to_owned();
+        // Relative imports resolve against this, so the entry has to know where it lives.
+        let filename = directory.join(name).to_string_lossy().into_owned();
         let outcome: Result<Vec<&'static str>, String> = context
-            .with(|ctx| {
+            .async_with(async |ctx| {
                 Class::<ScriptMessage>::define(&ctx.globals()).map_err(text)?;
                 Class::<ScriptChat>::define(&ctx.globals()).map_err(text)?;
                 Class::<ScriptAuthor>::define(&ctx.globals()).map_err(text)?;
@@ -47,9 +64,22 @@ impl Script {
                 Class::<ScriptSession>::define(&ctx.globals()).map_err(text)?;
                 install_console(&ctx).map_err(text)?;
 
-                ctx.eval::<(), _>(source.as_bytes())
+                let mut options = rquickjs::context::EvalOptions::default();
+                options.global = false;
+                options.promise = true;
+                options.filename = Some(filename);
+                let evaluated: rquickjs::Value = ctx
+                    .eval_with_options(source.as_bytes(), options)
                     .catch(&ctx)
                     .map_err(|error| error.to_string())?;
+                if let Some(promise) = evaluated.as_promise() {
+                    promise
+                        .clone()
+                        .into_future::<rquickjs::Value>()
+                        .await
+                        .catch(&ctx)
+                        .map_err(|error| error.to_string())?;
+                }
 
                 let globals = ctx.globals();
                 Ok(HOOKS
@@ -229,6 +259,21 @@ mod tests {
             script.call("onMessage", ()).await.is_err(),
             "an async hook swallowed its own failure"
         );
+    }
+
+    /// The resolver walks from the process's own directory, so the entry has to be named
+    /// relative to it — an absolute path resolves to nothing.
+    #[tokio::test]
+    async fn a_script_imports_a_module_beside_it() {
+        let entry = "import { roll } from './lib/dice.js';\n\
+                     globalThis.onMessage = () => { if (roll(20) < 1) throw 'bad'; };";
+
+        let script = Script::compile_in("main.js", entry, std::path::Path::new("scripts"))
+            .await
+            .unwrap();
+
+        assert!(script.defines("onMessage"), "a module lost its hooks");
+        script.call("onMessage", ()).await.unwrap();
     }
 
     #[tokio::test]

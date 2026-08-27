@@ -8,7 +8,7 @@ publish = false
 
 [dependencies]
 kakao-loco-client = { git = "https://github.com/wHoIsDReAmer/loco-protocol" }
-rquickjs = { version = "0.12.2", features = ["futures", "macro", "classes", "properties", "array-buffer"] }
+rquickjs = { version = "0.12.2", features = ["futures", "macro", "classes", "properties", "array-buffer", "loader"] }
 rune = "0.14.2"
 rune-modules = { version = "0.14.2", default-features = false, features = ["json", "time", "rand", "base64"] }
 thiserror = "2"
