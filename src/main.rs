@@ -17,8 +17,7 @@ fn main() -> Result<(), Box<dyn Error>> {
         .init();
 
     if std::env::var_os(STATE_ENV).is_none() {
-        let found = nearest_state()
-            .ok_or_else(|| format!("{STATE_FILE} 를 찾지 못했다. {STATE_ENV} 로 직접 지정해라"))?;
+        let found = nearest_state().ok_or_else(|| format!("{STATE_FILE} 를 찾지 못했습니다."))?;
         tracing::info!(state = %found.display(), "using account state");
         unsafe { std::env::set_var(STATE_ENV, &found) };
     }
@@ -33,7 +32,7 @@ fn main() -> Result<(), Box<dyn Error>> {
 }
 
 async fn serve(directory: &Path) -> Result<(), Box<dyn Error>> {
-    let mut host = ScriptHost::load_dir(directory)?;
+    let mut host = ScriptHost::load_dir(directory).await?;
     tracing::info!(count = host.len(), scripts = ?host.names(), "loaded");
 
     connect::serve(NetworkType::Wifi, "", &mut host).await?;
