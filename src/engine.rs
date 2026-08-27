@@ -1,4 +1,6 @@
-use rquickjs::function::{Func, Rest};
+use std::time::Duration;
+
+use rquickjs::function::{Func, Opt, Rest};
 use rquickjs::loader::{FileResolver, ScriptLoader};
 use rquickjs::{AsyncContext, AsyncRuntime, CatchResultExt, Class, Ctx, Function, Object, Value};
 
@@ -27,6 +29,7 @@ pub const HOOKS: [&str; 18] = [
 ];
 
 pub struct Script {
+    runtime: AsyncRuntime,
     context: AsyncContext,
     name: String,
     defined: Vec<&'static str>,
@@ -63,6 +66,8 @@ impl Script {
                 Class::<ScriptLink>::define(&ctx.globals()).map_err(text)?;
                 Class::<ScriptSession>::define(&ctx.globals()).map_err(text)?;
                 install_console(&ctx).map_err(text)?;
+                install_timers(&ctx).map_err(text)?;
+                crate::api::http::install(&ctx).map_err(text)?;
 
                 let mut options = rquickjs::context::EvalOptions::default();
                 options.global = false;
@@ -95,6 +100,7 @@ impl Script {
         })?;
 
         Ok(Self {
+            runtime,
             context,
             name: name.to_owned(),
             defined,
@@ -109,6 +115,11 @@ impl Script {
     #[must_use]
     pub fn defines(&self, hook: &str) -> bool {
         self.defined.contains(&hook)
+    }
+
+    /// Waits for whatever the script left running — a timer, a pending promise.
+    pub async fn idle(&self) {
+        self.runtime.idle().await;
     }
 
     #[must_use]
@@ -174,6 +185,43 @@ fn install_console(ctx: &Ctx<'_>) -> rquickjs::Result<()> {
     ctx.globals().set("console", console)
 }
 
+/// `setTimeout` and `setInterval`, which quickjs leaves to the host. Both run on the
+/// runtime the script is already on, so a delayed reply still has its session.
+fn install_timers<'js>(ctx: &Ctx<'js>) -> rquickjs::Result<()> {
+    let globals = ctx.globals();
+
+    globals.set(
+        "setTimeout",
+        Func::from(
+            |ctx: Ctx<'js>, callback: rquickjs::Function<'js>, delay: Opt<u64>| {
+                let delay = Duration::from_millis(delay.0.unwrap_or_default());
+                let callback = callback.clone();
+                ctx.spawn(async move {
+                    tokio::time::sleep(delay).await;
+                    if let Err(error) = callback.call::<_, Value>(()) {
+                        tracing::error!(%error, "timer failed");
+                    }
+                });
+            },
+        ),
+    )?;
+
+    globals.set(
+        "sleep",
+        Func::from(|ctx: Ctx<'js>, delay: u64| {
+            let (promise, resolve, reject) = ctx.promise()?;
+            ctx.spawn(async move {
+                tokio::time::sleep(Duration::from_millis(delay)).await;
+                let _ = reject;
+                let _ = resolve.call::<_, Value>(());
+            });
+            Ok::<_, rquickjs::Error>(promise)
+        }),
+    )?;
+
+    Ok(())
+}
+
 fn joined(args: &[Value]) -> String {
     args.iter()
         .map(|value| {
@@ -185,6 +233,20 @@ fn joined(args: &[Value]) -> String {
         })
         .collect::<Vec<_>>()
         .join(" ")
+}
+
+#[cfg(test)]
+impl Script {
+    /// Evaluates an expression and hands back what it rendered to.
+    async fn probe(&self, expression: &str) -> String {
+        let source = format!("String({expression})");
+        self.context
+            .async_with(async |ctx| {
+                ctx.eval::<String, _>(source.as_bytes())
+                    .unwrap_or_else(|error| error.to_string())
+            })
+            .await
+    }
 }
 
 fn engine_error(error: impl std::fmt::Display) -> ScriptError {
@@ -274,6 +336,81 @@ mod tests {
 
         assert!(script.defines("onMessage"), "a module lost its hooks");
         script.call("onMessage", ()).await.unwrap();
+    }
+
+    /// What the bare engine brings, so the gaps we fill are a deliberate list.
+    #[tokio::test]
+    async fn what_quickjs_ships_on_its_own() {
+        let script = Script::compile("probe", "").await.unwrap();
+
+        for present in [
+            "JSON", "Math", "Promise", "Date", "RegExp", "Map", "Set", "BigInt",
+        ] {
+            assert_ne!(
+                script.probe(&format!("typeof {present}")).await,
+                "undefined",
+                "{present} is missing",
+            );
+        }
+
+        // What we filled in ourselves.
+        for bound in ["console", "setTimeout", "sleep", "fetch"] {
+            assert_ne!(
+                script.probe(&format!("typeof {bound}")).await,
+                "undefined",
+                "{bound} was dropped",
+            );
+        }
+
+        // Still host territory, still unbound.
+        for absent in ["TextEncoder", "URL", "crypto"] {
+            assert_eq!(
+                script.probe(&format!("typeof {absent}")).await,
+                "undefined",
+                "{absent} arrived on its own",
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn sleep_actually_waits() {
+        let script = Script::compile(
+            "t",
+            "globalThis.onMessage = async () => { globalThis.done = false; await sleep(60); globalThis.done = true; };",
+        )
+        .await
+        .unwrap();
+
+        let started = std::time::Instant::now();
+        script.call("onMessage", ()).await.unwrap();
+
+        assert!(started.elapsed().as_millis() >= 60, "it returned early");
+        assert_eq!(script.probe("globalThis.done").await, "true");
+    }
+
+    #[tokio::test]
+    async fn a_timer_runs_after_the_hook_returns() {
+        let script = Script::compile(
+            "t",
+            "globalThis.fired = false;\n\
+             globalThis.onMessage = () => { setTimeout(() => { globalThis.fired = true; }, 20); };",
+        )
+        .await
+        .unwrap();
+
+        script.call("onMessage", ()).await.unwrap();
+        assert_eq!(
+            script.probe("globalThis.fired").await,
+            "false",
+            "it ran early"
+        );
+
+        script.idle().await;
+        assert_eq!(
+            script.probe("globalThis.fired").await,
+            "true",
+            "it never ran"
+        );
     }
 
     #[tokio::test]
