@@ -4,13 +4,13 @@ use kakao_loco_client::prelude::*;
 use rquickjs::JsLifetime;
 use rquickjs::class::Trace;
 
-use super::{ScriptChat, failed};
+use super::{ScriptChat, failed, id_text};
 
 #[derive(Clone, Trace, JsLifetime)]
 #[rquickjs::class(rename = "Link")]
 pub struct ScriptLink {
     #[qjs(get)]
-    pub link_id: i64,
+    pub link_id: String,
     #[qjs(get)]
     pub name: String,
     #[qjs(get)]
@@ -33,7 +33,7 @@ impl ScriptLink {
     #[must_use]
     pub fn new(link: Link) -> Self {
         Self {
-            link_id: link.link_id,
+            link_id: id_text(link.link_id),
             name: link.name.clone(),
             url: link.url.clone(),
             description: link.description.clone(),

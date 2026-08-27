@@ -2,7 +2,9 @@ use std::time::Duration;
 
 use rquickjs::function::{Func, Opt, Rest};
 use rquickjs::loader::{FileResolver, ScriptLoader};
-use rquickjs::{AsyncContext, AsyncRuntime, CatchResultExt, Class, Ctx, Function, Object, Value};
+use rquickjs::{
+    AsyncContext, AsyncRuntime, CatchResultExt, Class, Ctx, FromJs, Function, Object, Value,
+};
 
 use crate::api::{ScriptAuthor, ScriptChat, ScriptLink, ScriptMessage, ScriptRoom, ScriptSession};
 use crate::error::ScriptError;
@@ -145,7 +147,7 @@ impl Script {
             .context
             .async_with(async |ctx| {
                 let hook: Function = ctx.globals().get(hook).map_err(text)?;
-                let returned: rquickjs::Value = hook.call(args).catch(&ctx).map_err(text)?;
+                let returned: rquickjs::Value = hook.call(args).catch(&ctx).map_err(reported)?;
 
                 if let Some(promise) = returned.as_promise() {
                     promise
@@ -153,7 +155,7 @@ impl Script {
                         .into_future::<rquickjs::Value>()
                         .await
                         .catch(&ctx)
-                        .map_err(text)?;
+                        .map_err(reported)?;
                 }
                 Ok(())
             })
@@ -223,14 +225,14 @@ fn install_timers<'js>(ctx: &Ctx<'js>) -> rquickjs::Result<()> {
     Ok(())
 }
 
+/// Anything a script passes, rendered the way the script would see it — a number or an
+/// error prints as itself rather than as the host's idea of it.
 fn joined(args: &[Value]) -> String {
     args.iter()
         .map(|value| {
-            value
-                .clone()
-                .into_string()
-                .and_then(|text| text.to_string().ok())
-                .unwrap_or_else(|| format!("{value:?}"))
+            rquickjs::Coerced::<String>::from_js(value.ctx(), value.clone())
+                .map(|coerced| coerced.0)
+                .unwrap_or_else(|_| format!("{:?}", value.type_of()))
         })
         .collect::<Vec<_>>()
         .join(" ")
@@ -253,13 +255,95 @@ fn engine_error(error: impl std::fmt::Display) -> ScriptError {
     ScriptError::Rune(error.to_string())
 }
 
+/// A bare message says a call failed but not where; the stack names the line.
+fn reported(error: rquickjs::CaughtError<'_>) -> String {
+    if let rquickjs::CaughtError::Exception(exception) = &error {
+        let mut rendered = exception.message().unwrap_or_else(|| error.to_string());
+        if let Some(stack) = exception.stack() {
+            rendered.push('\n');
+            rendered.push_str(stack.trim_end());
+        }
+        return rendered;
+    }
+    error.to_string()
+}
+
 fn text(error: impl std::fmt::Display) -> String {
     error.to_string()
 }
 
 #[cfg(test)]
 mod tests {
+    use rquickjs::class::Trace;
+    use rquickjs::{Class, JsLifetime};
+
     use super::{HOOKS, Script};
+
+    #[derive(Clone, Trace, JsLifetime)]
+    #[rquickjs::class(rename = "Inner")]
+    pub struct Inner {
+        #[qjs(get)]
+        pub id: i64,
+    }
+
+    #[rquickjs::methods]
+    impl Inner {
+        fn touch(&self, note: String) -> String {
+            format!("{}:{note}", self.id)
+        }
+
+        async fn give(&self) -> String {
+            super::super::api::id_text(3_915_793_272_451_299_329)
+        }
+
+        async fn take(&self, id: String, note: String) -> rquickjs::Result<String> {
+            Ok(format!("{}:{note}", super::super::api::id_of(&id)?))
+        }
+    }
+
+    #[derive(Clone, Trace, JsLifetime)]
+    #[rquickjs::class(rename = "Outer")]
+    pub struct Outer {
+        #[qjs(skip_trace)]
+        inner: Inner,
+    }
+
+    #[rquickjs::methods]
+    impl Outer {
+        #[qjs(get, rename = "inner")]
+        fn inner_js(&self) -> Inner {
+            self.inner.clone()
+        }
+    }
+
+    /// A class handed back from a getter has to arrive with its methods, which is how
+    /// `msg.chat.edit` reaches the host at all.
+    #[tokio::test]
+    async fn a_nested_class_keeps_its_methods() {
+        let script = Script::compile("t", "").await.unwrap();
+
+        let reported: String = script
+            .context
+            .async_with(async |ctx| {
+                Class::<Inner>::define(&ctx.globals()).unwrap();
+                Class::<Outer>::define(&ctx.globals()).unwrap();
+                let outer = Class::instance(
+                    ctx.clone(),
+                    Outer {
+                        inner: Inner { id: 7 },
+                    },
+                )
+                .unwrap();
+                ctx.globals().set("outer", outer).unwrap();
+                ctx.eval::<String, _>(
+                    "String(typeof outer.inner.touch) + ' ' + String(outer.inner.id)".as_bytes(),
+                )
+                .unwrap_or_else(|error| error.to_string())
+            })
+            .await;
+
+        assert_eq!(reported, "function 7", "a getter dropped the methods");
+    }
 
     #[tokio::test]
     async fn a_script_says_which_hooks_it_defines() {
@@ -451,6 +535,51 @@ mod tests {
         script.call("onMessage", ()).await.unwrap();
 
         assert_eq!(script.probe("globalThis.caught").await, "yes");
+    }
+
+    /// A log id is wider than a js number, so it has to survive the round trip that
+    /// `msg.say` then `chat.edit` puts it through.
+    #[tokio::test]
+    async fn a_log_id_survives_a_round_trip() {
+        let script = Script::compile("t", "").await.unwrap();
+
+        let reported: String = script
+            .context
+            .async_with(async |ctx| {
+                Class::<Inner>::define(&ctx.globals()).unwrap();
+                let inner = Class::instance(ctx.clone(), Inner { id: 1 }).unwrap();
+                ctx.globals().set("inner", inner).unwrap();
+                let source = "(async () => {\n\
+                    const id = await inner.give();\n\
+                    return typeof id + ' ' + String(await inner.take(id, 'x'));\n\
+                  })()";
+                match ctx.eval::<rquickjs::Promise, _>(source.as_bytes()) {
+                    Ok(promise) => promise
+                        .into_future::<String>()
+                        .await
+                        .unwrap_or_else(|error| error.to_string()),
+                    Err(error) => error.to_string(),
+                }
+            })
+            .await;
+
+        assert_eq!(
+            reported, "string 3915793272451299329:x",
+            "a log id changed on the way through",
+        );
+    }
+
+    /// A diagnostic is useless if the argument carrying it prints as nothing.
+    #[tokio::test]
+    async fn console_renders_more_than_strings() {
+        let script = Script::compile("t", "").await.unwrap();
+
+        assert_eq!(script.probe("String(42)").await, "42");
+        assert_eq!(
+            script.probe("String(new Error('boom'))").await,
+            "Error: boom"
+        );
+        assert_eq!(script.probe("String({ a: 1 })").await, "[object Object]");
     }
 
     #[tokio::test]

@@ -3,7 +3,7 @@ use kakao_loco_client::prelude::*;
 use rquickjs::JsLifetime;
 use rquickjs::class::Trace;
 
-use super::{ScriptAuthor, ScriptChat, failed};
+use super::{ScriptAuthor, ScriptChat, failed, id_text};
 
 #[derive(Clone, Trace, JsLifetime)]
 #[rquickjs::class(rename = "Message")]
@@ -15,7 +15,7 @@ pub struct ScriptMessage {
     #[qjs(skip_trace)]
     pub chat: ScriptChat,
     #[qjs(get)]
-    pub log_id: i64,
+    pub log_id: String,
     #[qjs(skip_trace)]
     log: ChatLog,
 }
@@ -27,7 +27,7 @@ impl ScriptMessage {
             text: message.text().to_owned(),
             author: ScriptAuthor::new(message.author()),
             chat: ScriptChat::new(&message.chat()),
-            log_id: message.log_id(),
+            log_id: id_text(message.log_id()),
             log: message.log(),
         }
     }
@@ -45,21 +45,21 @@ impl ScriptMessage {
         self.chat.clone()
     }
 
-    async fn say(&self, text: String) -> rquickjs::Result<i64> {
+    async fn say(&self, text: String) -> rquickjs::Result<String> {
         self.chat
             .chat
             .write(&text)
             .await
-            .map(|log| log.log_id)
+            .map(|log| id_text(log.log_id))
             .map_err(failed)
     }
 
-    async fn reply(&self, text: String) -> rquickjs::Result<i64> {
+    async fn reply(&self, text: String) -> rquickjs::Result<String> {
         self.chat
             .chat
             .reply(&self.log, &text)
             .await
-            .map(|log| log.log_id)
+            .map(|log| id_text(log.log_id))
             .map_err(failed)
     }
 
@@ -68,7 +68,7 @@ impl ScriptMessage {
             .ok_or_else(|| failed(format!("{reaction} 은 없는 반응이다")))?;
         self.chat
             .chat
-            .react(self.log_id, reaction)
+            .react(super::id_of(&self.log_id)?, reaction)
             .await
             .map_err(failed)
     }
@@ -77,7 +77,7 @@ impl ScriptMessage {
     async fn cancel_reaction(&self) -> rquickjs::Result<()> {
         self.chat
             .chat
-            .cancel_reaction(self.log_id)
+            .cancel_reaction(super::id_of(&self.log_id)?)
             .await
             .map_err(failed)
     }
@@ -94,14 +94,18 @@ impl ScriptMessage {
     async fn delete(&self) -> rquickjs::Result<bool> {
         self.chat
             .chat
-            .delete(self.log_id)
+            .delete(super::id_of(&self.log_id)?)
             .await
             .map(|log| log.is_some())
             .map_err(failed)
     }
 
     async fn hide(&self) -> rquickjs::Result<String> {
-        self.chat.chat.hide(&[self.log_id]).await.map_err(failed)
+        self.chat
+            .chat
+            .hide(&[super::id_of(&self.log_id)?])
+            .await
+            .map_err(failed)
     }
 
     #[qjs(rename = "toString")]
