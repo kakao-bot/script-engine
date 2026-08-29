@@ -409,12 +409,14 @@ mod tests {
 
     #[tokio::test]
     async fn a_script_imports_a_module_beside_it() {
+        let dir = std::path::PathBuf::from("target/fixtures/import");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("lib")).unwrap();
+        std::fs::write(dir.join("lib/dice.js"), "export const roll = (n) => n;").unwrap();
         let entry = "import { roll } from './lib/dice.js';\n\
                      globalThis.onMessage = () => { if (roll(20) < 1) throw 'bad'; };";
 
-        let script = Script::compile_in("main.js", entry, std::path::Path::new("scripts"))
-            .await
-            .unwrap();
+        let script = Script::compile_in("main.js", entry, &dir).await.unwrap();
 
         assert!(script.defines("onMessage"), "a module lost its hooks");
         script.call("onMessage", ()).await.unwrap();
