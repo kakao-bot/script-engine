@@ -14,8 +14,6 @@ pub use message::ScriptMessage;
 pub use room::ScriptRoom;
 pub use session::ScriptSession;
 
-/// Ids outrun a js number — a log id past 2^53 comes back with its last digit changed —
-/// so they cross as text and are parsed on the way in.
 pub fn id_text(id: i64) -> String {
     id.to_string()
 }

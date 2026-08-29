@@ -34,7 +34,6 @@ impl ScriptResponse {
     }
 }
 
-/// `fetch`, cut down to what a bot needs: a method, headers and a body.
 pub fn install<'js>(ctx: &Ctx<'js>) -> rquickjs::Result<()> {
     rquickjs::Class::<ScriptResponse>::define(&ctx.globals())?;
     ctx.globals().set(

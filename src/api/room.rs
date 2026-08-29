@@ -21,6 +21,10 @@ pub struct ScriptRoom {
     pub link_id: String,
     #[qjs(get)]
     pub is_full: bool,
+    #[qjs(get)]
+    pub title: String,
+    #[qjs(get)]
+    pub display_name: String,
 }
 
 impl ScriptRoom {
@@ -34,6 +38,8 @@ impl ScriptRoom {
             last_log_id: id_text(room.last_log_id.unwrap_or_default()),
             link_id: id_text(room.link_id),
             is_full: room.is_full,
+            title: room.title().unwrap_or_default().to_owned(),
+            display_name: room.display_name(),
         }
     }
 }
@@ -42,6 +48,6 @@ impl ScriptRoom {
 impl ScriptRoom {
     #[qjs(rename = "toString")]
     fn to_string_js(&self) -> String {
-        format!("Room({}, {})", self.chat_id, self.kind)
+        format!("Room({}, {})", self.chat_id, self.display_name)
     }
 }

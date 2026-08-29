@@ -1,9 +1,24 @@
+use std::collections::HashMap;
+use std::sync::{Mutex, OnceLock};
+
 use kakao_loco_client::core::command::chat::ChatLog;
 use kakao_loco_client::prelude::*;
 use rquickjs::JsLifetime;
 use rquickjs::class::Trace;
 
 use super::{ScriptAuthor, ScriptSession, failed, id_of, id_text};
+
+fn titles() -> &'static Mutex<HashMap<ChatId, String>> {
+    static TITLES: OnceLock<Mutex<HashMap<ChatId, String>>> = OnceLock::new();
+    TITLES.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+/// 방 설정이 바뀌면 이름도 바뀌었을 수 있다.
+pub fn forget_title(chat_id: ChatId) {
+    if let Ok(mut held) = titles().lock() {
+        held.remove(&chat_id);
+    }
+}
 
 #[derive(Clone, Trace, JsLifetime)]
 #[rquickjs::class(rename = "Chat")]
@@ -27,6 +42,33 @@ impl ScriptChat {
             .ok_or_else(|| failed(format!("로그 {log_id} 이(가) 없다")))
     }
 
+    pub async fn title(&self) -> Result<String, ClientError> {
+        let chat_id = self.chat.id();
+        if let Some(known) = titles()
+            .lock()
+            .ok()
+            .and_then(|held| held.get(&chat_id).cloned())
+        {
+            return Ok(known);
+        }
+
+        let mut found = String::new();
+        if self.chat.is_open_chat() == Some(true)
+            && let Some(link_id) = self.chat.link_id()
+            && let Some(link) = self.chat.session().open_link_by_id(link_id).await?
+        {
+            found = link.name;
+        }
+        if found.is_empty() {
+            found = self.chat.title().await?.unwrap_or_default();
+        }
+
+        if let Ok(mut held) = titles().lock() {
+            held.insert(chat_id, found.clone());
+        }
+        Ok(found)
+    }
+
     #[must_use]
     pub fn new(chat: &Chat) -> Self {
         Self {
@@ -40,6 +82,11 @@ impl ScriptChat {
 
 #[rquickjs::methods]
 impl ScriptChat {
+    #[qjs(rename = "title")]
+    async fn title_js(&self) -> rquickjs::Result<String> {
+        self.title().await.map_err(failed)
+    }
+
     async fn write(&self, text: String) -> rquickjs::Result<String> {
         self.chat
             .write(&text)
@@ -48,7 +95,6 @@ impl ScriptChat {
             .map_err(failed)
     }
 
-    /// 이식하면서 빠졌던 것들 — 편집이 없으면 살아 움직이는 메시지를 못 만든다.
     async fn edit(&self, log_id: String, text: String) -> rquickjs::Result<()> {
         let log = self.fetch(&log_id).await?;
         self.chat.edit(&log, &text).await.map(drop).map_err(failed)

@@ -35,6 +35,10 @@ async fn serve(directory: &Path) -> Result<(), Box<dyn Error>> {
     let mut host = ScriptHost::load_dir(directory).await?;
     tracing::info!(count = host.len(), scripts = ?host.names(), "loaded");
 
+    for driver in host.drivers() {
+        tokio::task::spawn_local(driver);
+    }
+
     connect::serve(NetworkType::Wifi, "", &mut host).await?;
     Ok(())
 }

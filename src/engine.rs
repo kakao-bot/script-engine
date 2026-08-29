@@ -122,9 +122,13 @@ impl Script {
         self.defined.contains(&hook)
     }
 
-    /// Waits for whatever the script left running.
     pub async fn idle(&self) {
         self.runtime.idle().await;
+    }
+
+    #[must_use]
+    pub fn drive(&self) -> rquickjs::runtime::DriveFuture {
+        self.runtime.drive()
     }
 
     #[must_use]
@@ -134,7 +138,6 @@ impl Script {
 }
 
 impl Script {
-    /// Calls a hook and, when it returns a promise, waits for it to settle.
     pub async fn call<A>(&self, hook: &'static str, args: A) -> Result<(), ScriptError>
     where
         A: for<'js> rquickjs::function::IntoArgs<'js> + Send + 'static,
@@ -225,8 +228,6 @@ fn install_timers<'js>(ctx: &Ctx<'js>) -> rquickjs::Result<()> {
     Ok(())
 }
 
-/// Anything a script passes, rendered the way the script would see it — a number or an
-/// error prints as itself rather than as the host's idea of it.
 fn joined(args: &[Value]) -> String {
     args.iter()
         .map(|value| {
@@ -240,7 +241,7 @@ fn joined(args: &[Value]) -> String {
 
 #[cfg(test)]
 impl Script {
-    async fn probe(&self, expression: &str) -> String {
+    pub(crate) async fn probe(&self, expression: &str) -> String {
         let source = format!("String({expression})");
         self.context
             .async_with(async |ctx| {
@@ -255,7 +256,6 @@ fn engine_error(error: impl std::fmt::Display) -> ScriptError {
     ScriptError::Rune(error.to_string())
 }
 
-/// A bare message says a call failed but not where; the stack names the line.
 fn reported(error: rquickjs::CaughtError<'_>) -> String {
     if let rquickjs::CaughtError::Exception(exception) = &error {
         let mut rendered = exception.message().unwrap_or_else(|| error.to_string());
@@ -274,6 +274,8 @@ fn text(error: impl std::fmt::Display) -> String {
 
 #[cfg(test)]
 mod tests {
+    use std::time::Duration;
+
     use rquickjs::class::Trace;
     use rquickjs::{Class, JsLifetime};
 
@@ -316,8 +318,6 @@ mod tests {
         }
     }
 
-    /// A class handed back from a getter has to arrive with its methods, which is how
-    /// `msg.chat.edit` reaches the host at all.
     #[tokio::test]
     async fn a_nested_class_keeps_its_methods() {
         let script = Script::compile("t", "").await.unwrap();
@@ -495,6 +495,31 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_timer_fires_while_the_host_waits() {
+        let local = tokio::task::LocalSet::new();
+        local
+            .run_until(async {
+                let script = Script::compile(
+                    "t",
+                    "globalThis.fired = false;\n\
+                     setTimeout(() => { globalThis.fired = true; }, 20);",
+                )
+                .await
+                .unwrap();
+
+                tokio::task::spawn_local(script.drive());
+                tokio::time::sleep(Duration::from_millis(150)).await;
+
+                assert_eq!(
+                    script.probe("globalThis.fired").await,
+                    "true",
+                    "배경 작업이 호스트를 기다리다 멈췄다",
+                );
+            })
+            .await;
+    }
+
+    #[tokio::test]
     async fn a_script_keeps_its_own_state_on_disk() {
         let path = std::env::temp_dir().join("script-engine-state/sheet.json");
         let _ = std::fs::remove_file(&path);
@@ -537,8 +562,6 @@ mod tests {
         assert_eq!(script.probe("globalThis.caught").await, "yes");
     }
 
-    /// A log id is wider than a js number, so it has to survive the round trip that
-    /// `msg.say` then `chat.edit` puts it through.
     #[tokio::test]
     async fn a_log_id_survives_a_round_trip() {
         let script = Script::compile("t", "").await.unwrap();
@@ -569,7 +592,6 @@ mod tests {
         );
     }
 
-    /// A diagnostic is useless if the argument carrying it prints as nothing.
     #[tokio::test]
     async fn console_renders_more_than_strings() {
         let script = Script::compile("t", "").await.unwrap();

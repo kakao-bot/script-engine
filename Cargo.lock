@@ -820,7 +820,7 @@ dependencies = [
 [[package]]
 name = "kakao-auth"
 version = "0.0.1"
-source = "git+https://github.com/wHoIsDReAmer/loco-protocol#a99fab175da7f5a2954097ab9b59d1f0b4468cec"
+source = "git+https://github.com/wHoIsDReAmer/loco-protocol#16517f56c20bd9de90a3b6109a491ea49bbfeb0f"
 dependencies = [
  "reqwest",
  "serde",
@@ -833,7 +833,7 @@ dependencies = [
 [[package]]
 name = "kakao-loco-client"
 version = "0.0.1"
-source = "git+https://github.com/wHoIsDReAmer/loco-protocol#a99fab175da7f5a2954097ab9b59d1f0b4468cec"
+source = "git+https://github.com/wHoIsDReAmer/loco-protocol#16517f56c20bd9de90a3b6109a491ea49bbfeb0f"
 dependencies = [
  "bson",
  "kakao-auth",
@@ -880,7 +880,7 @@ checksum = "47d9d19d1d6efa0109d2f65ff4c85cddd50bd572e5a00127ab10987290bcefae"
 [[package]]
 name = "loco-core"
 version = "0.0.1"
-source = "git+https://github.com/wHoIsDReAmer/loco-protocol#a99fab175da7f5a2954097ab9b59d1f0b4468cec"
+source = "git+https://github.com/wHoIsDReAmer/loco-protocol#16517f56c20bd9de90a3b6109a491ea49bbfeb0f"
 dependencies = [
  "aes-gcm",
  "bson",
